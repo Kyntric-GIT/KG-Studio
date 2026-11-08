@@ -662,7 +662,7 @@ export default function App() {
               <span>Position {axis.toUpperCase()}</span>
               <input type="number" step="0.1"
                 value={selectedMesh ? Number(selectedMesh.position[axis].toFixed(2)) : 0}
-                onChange={e => updateTransform("position", axis, Number(e.target.value)}
+                onChange={e => updateTransform("position", axis, Number(e.target.value))}
               />
             </div>
           )}
