@@ -81,7 +81,7 @@ export default function App() {
 
     transform.addEventListener("dragging-changed", event => {
       orbitEnabled = !event.value;
-      orbitDragging = event.value;
+      orbitDragging.current = Boolean(event.value);
     });
 
     transform.addEventListener("objectChange", () => {
