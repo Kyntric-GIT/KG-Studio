@@ -5,42 +5,165 @@ import { TransformControls } from "three/examples/jsm/controls/TransformControls
 import {
   Box, ChevronDown, Cloud, Cuboid, Folder, Gamepad2, Grid2X2,
   Play, Plus, Search, Settings, Shapes, Move, RotateCw,
-  Scaling, Save, Sparkles
+  Scaling, Save, Sparkles, FolderOpen
 } from "lucide-react";
 
 type ObjectItem = { name: string; kind: string };
 type Tool = "Select" | "Move" | "Scale" | "Rotate";
 
+type SavedObject = {
+  name: string;
+  kind: string;
+  position: [number, number, number];
+  rotation: [number, number, number];
+  scale: [number, number, number];
+};
+
+type ProjectFile = {
+  format: "KGStudioProject";
+  version: 1;
+  project: string;
+  items: ObjectItem[];
+  objects: SavedObject[];
+};
+
+const DEFAULT_ITEMS: ObjectItem[] = [
+  { name: "Workspace", kind: "Folder" },
+  { name: "Camera", kind: "Camera" },
+  { name: "Terrain", kind: "Terrain" },
+  { name: "SpawnLocation", kind: "Part" }
+];
+
+const STORAGE_KEY = "kg-studio-project-v1";
+
+function readLocalProject(): ProjectFile | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed.format !== "KGStudioProject") return null;
+    return parsed as ProjectFile;
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
-  const [project, setProject] = useState("Untitled Experience");
-  const [items, setItems] = useState<ObjectItem[]>([
-    { name: "Workspace", kind: "Folder" },
-    { name: "Camera", kind: "Camera" },
-    { name: "Terrain", kind: "Terrain" },
-    { name: "SpawnLocation", kind: "Part" }
-  ]);
+  const initialProject = readLocalProject();
+
+  const [project, setProject] = useState(initialProject?.project ?? "Untitled Experience");
+  const [items, setItems] = useState<ObjectItem[]>(initialProject?.items ?? DEFAULT_ITEMS);
   const [selected, setSelected] = useState("SpawnLocation");
   const [tool, setTool] = useState<Tool>("Select");
   const [saved, setSaved] = useState(false);
   const [play, setPlay] = useState(false);
   const [showGrid, setShowGrid] = useState(true);
   const [, refresh] = useState(0);
+  const [loadVersion, setLoadVersion] = useState(0);
 
   const sceneRef = useRef<HTMLDivElement>(null);
   const threeSceneRef = useRef<THREE.Scene | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const meshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
   const transformRef = useRef<TransformControls | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const pendingObjectsRef = useRef<SavedObject[]>(
+    initialProject?.objects ?? []
+  );
+
+  const getProjectData = (): ProjectFile => {
+    const objects: SavedObject[] = [];
+
+    for (const item of items) {
+      const mesh = meshesRef.current.get(item.name);
+      if (!mesh) continue;
+
+      objects.push({
+        name: item.name,
+        kind: item.kind,
+        position: [mesh.position.x, mesh.position.y, mesh.position.z],
+        rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+        scale: [mesh.scale.x, mesh.scale.y, mesh.scale.z]
+      });
+    }
+
+    return {
+      format: "KGStudioProject",
+      version: 1,
+      project,
+      items,
+      objects
+    };
+  };
+
+  const saveProject = () => {
+    const data = getProjectData();
+    const json = JSON.stringify(data, null, 2);
+
+    try {
+      localStorage.setItem(STORAGE_KEY, json);
+    } catch {
+      alert("Could not save to browser storage.");
+    }
+
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${project.trim().replace(/[^a-z0-9-_]/gi, "_") || "KGProject"}.kgproject.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    setSaved(true);
+  };
+
+  const loadProject = async (file: File) => {
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text) as ProjectFile;
+
+      if (
+        data.format !== "KGStudioProject" ||
+        !Array.isArray(data.items) ||
+        !Array.isArray(data.objects)
+      ) {
+        throw new Error("Invalid KG Studio project file.");
+      }
+
+      const safeItems = data.items.filter(
+        item =>
+          item &&
+          typeof item.name === "string" &&
+          typeof item.kind === "string"
+      );
+
+      pendingObjectsRef.current = data.objects;
+      setProject(typeof data.project === "string" ? data.project : "Imported Project");
+      setItems(safeItems);
+      setSelected(safeItems.find(x => x.kind === "Part")?.name ?? "Workspace");
+      setLoadVersion(v => v + 1);
+      setSaved(true);
+
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Unable to load project.");
+    }
+  };
 
   const addPart = () => {
     const existing = items.filter(x => x.kind === "Part").length;
-    const name = "Part" + (existing + 1);
+    let name = "Part" + (existing + 1);
+    let suffix = 1;
+
+    while (items.some(x => x.name === name)) {
+      name = `Part${existing + 1}_${suffix++}`;
+    }
+
     setItems(prev => [...prev, { name, kind: "Part" }]);
     setSelected(name);
     setSaved(false);
   };
 
-  // Three.js scene initialization
+  // Initialize Three.js viewport
   useEffect(() => {
     const container = sceneRef.current;
     if (!container) return;
@@ -52,7 +175,7 @@ export default function App() {
     const camera = new THREE.PerspectiveCamera(
       60, container.clientWidth / container.clientHeight, 0.1, 1000
     );
-    cameraRef.current = camera;
+    camera.position.set(8, 7, 10);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -100,9 +223,7 @@ export default function App() {
     grid.name = "KG_GRID";
     scene.add(grid);
 
-    const axes = new THREE.AxesHelper(5);
-    axes.name = "KG_AXES";
-    scene.add(axes);
+    scene.add(new THREE.AxesHelper(5));
 
     const updateCamera = () => {
       camera.position.set(
@@ -116,7 +237,6 @@ export default function App() {
 
     const onPointerDown = (e: PointerEvent) => {
       if (!orbitEnabled || transform.axis !== null) return;
-
       orbitDragging = true;
       moved = false;
       lastX = e.clientX;
@@ -163,9 +283,11 @@ export default function App() {
 
       if (hits.length) {
         const name = hits[0].object.userData.name;
-        if (name) window.dispatchEvent(
-          new CustomEvent("kg-select-object", { detail: name })
-        );
+        if (name) {
+          window.dispatchEvent(
+            new CustomEvent("kg-select-object", { detail: name })
+          );
+        }
       }
     };
 
@@ -212,7 +334,6 @@ export default function App() {
       scene.clear();
       meshesRef.current.clear();
       threeSceneRef.current = null;
-      cameraRef.current = null;
     };
   }, []);
 
@@ -225,7 +346,7 @@ export default function App() {
     return () => window.removeEventListener("kg-select-object", handler);
   }, []);
 
-  // Create/remove scene objects
+  // Create and remove scene objects; apply imported transforms
   useEffect(() => {
     const scene = threeSceneRef.current;
     if (!scene) return;
@@ -275,9 +396,28 @@ export default function App() {
       scene.add(mesh);
       meshes.set(item.name, mesh);
     }
-  }, [items]);
 
-  // Attach transform gizmo to selected mesh
+    // Restore imported or browser-autosaved transforms
+    for (const savedObject of pendingObjectsRef.current) {
+      const mesh = meshes.get(savedObject.name);
+      if (!mesh) continue;
+
+      if (savedObject.position?.length === 3) {
+        mesh.position.fromArray(savedObject.position);
+      }
+      if (savedObject.rotation?.length === 3) {
+        mesh.rotation.set(...savedObject.rotation);
+      }
+      if (savedObject.scale?.length === 3) {
+        mesh.scale.fromArray(savedObject.scale);
+      }
+    }
+
+    pendingObjectsRef.current = [];
+    refresh(v => v + 1);
+  }, [items, loadVersion]);
+
+  // Attach transform gizmo to selected object
   useEffect(() => {
     const control = transformRef.current;
     if (!control) return;
@@ -297,7 +437,7 @@ export default function App() {
     control.enabled = true;
   }, [selected, tool, items, play]);
 
-  // Selected object highlight
+  // Highlight selected object
   useEffect(() => {
     for (const [name, mesh] of meshesRef.current) {
       const material = mesh.material as THREE.MeshStandardMaterial;
@@ -310,6 +450,15 @@ export default function App() {
     const grid = threeSceneRef.current?.getObjectByName("KG_GRID");
     if (grid) grid.visible = showGrid;
   }, [showGrid]);
+
+  // Browser autosave
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(getProjectData()));
+    } catch {
+      // Browser storage may be unavailable or full.
+    }
+  });
 
   const selectedMesh = meshesRef.current.get(selected);
 
@@ -351,9 +500,27 @@ export default function App() {
         <span className={saved ? "saved" : "unsaved"}>
           <Cloud size={15}/>{saved ? "Saved" : "Unsaved changes"}
         </span>
-        <button className="save" onClick={() => setSaved(true)}>
+
+        <button className="save" onClick={saveProject}>
           <Save size={15}/> Save Project
         </button>
+
+        <button className="save" onClick={() => fileInputRef.current?.click()}>
+          <FolderOpen size={15}/> Load
+        </button>
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".json,.kgproject.json,application/json"
+          style={{ display: "none" }}
+          onChange={e => {
+            const file = e.target.files?.[0];
+            if (file) void loadProject(file);
+            e.target.value = "";
+          }}
+        />
+
         <Settings size={17}/>
       </div>
     </header>
@@ -493,11 +660,9 @@ export default function App() {
           {(["x", "y", "z"] as const).map(axis =>
             <div className="propertyrow" key={"position-" + axis}>
               <span>Position {axis.toUpperCase()}</span>
-              <input
-                type="number"
-                step="0.1"
+              <input type="number" step="0.1"
                 value={selectedMesh ? Number(selectedMesh.position[axis].toFixed(2)) : 0}
-                onChange={e => updateTransform("position", axis, Number(e.target.value))}
+                onChange={e => updateTransform("position", axis, Number(e.target.value)}
               />
             </div>
           )}
@@ -505,9 +670,7 @@ export default function App() {
           {(["x", "y", "z"] as const).map(axis =>
             <div className="propertyrow" key={"rotation-" + axis}>
               <span>Rotation {axis.toUpperCase()}</span>
-              <input
-                type="number"
-                step="1"
+              <input type="number" step="1"
                 value={selectedMesh
                   ? Number(THREE.MathUtils.radToDeg(selectedMesh.rotation[axis]).toFixed(1))
                   : 0}
@@ -519,10 +682,7 @@ export default function App() {
           {(["x", "y", "z"] as const).map(axis =>
             <div className="propertyrow" key={"scale-" + axis}>
               <span>Scale {axis.toUpperCase()}</span>
-              <input
-                type="number"
-                step="0.1"
-                min="0.01"
+              <input type="number" step="0.1" min="0.01"
                 value={selectedMesh ? Number(selectedMesh.scale[axis].toFixed(2)) : 1}
                 onChange={e => updateTransform("scale", axis, Math.max(0.01, Number(e.target.value)))}
               />
@@ -536,7 +696,7 @@ export default function App() {
 
     <footer>
       <span>KG Studio · Three.js Preview</span>
-      <span>Changes are local in this prototype</span>
+      <span>Browser autosave enabled</span>
     </footer>
   </div>;
 }
